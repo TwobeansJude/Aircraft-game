@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>手势战机</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <style>
+        body, html { 
+            margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; 
+            background: #f0f4f8; /* 浅蓝灰色背景 */
+            color: #333; 
+            font-family: 'Segoe UI', sans-serif; 
+        }
+        #game-container { position: relative; width: 100vw; height: 100vh; }
+        canvas { display: block; }
+        
+        /* 界面层：半透明白色主题 */
+        .ui-layer { 
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; 
+            display: flex; flex-direction: column; justify-content: center; align-items: center; 
+            background: rgba(255, 255, 255, 0.85); 
+            z-index: 100; 
+            backdrop-filter: blur(5px);
+        }
+        .hidden { display: none !important; }
+        
+        button { 
+            padding: 15px 40px; font-size: 1.2rem; font-weight: bold;
+            background: #ffffff; color: #4facfe; 
+            border: 2px solid #4facfe; border-radius: 30px;
+            cursor: pointer; transition: 0.3s;
+        }
+        button:hover { background: #4facfe; color: white; box-shadow: 0 4px 15px rgba(79, 172, 254, 0.4); }
+
+        #stats { 
+            position: absolute; top: 20px; left: 20px; 
+            font-size: 1.1rem; color: #555; font-weight: 600;
+            background: rgba(255, 255, 255, 0.7); padding: 10px 20px; border-radius: 20px;
+        }
+        #gesture-status { 
+            position: absolute; top: 20px; right: 20px; 
+            font-weight: bold; background: rgba(255, 255, 255, 0.7); 
+            padding: 10px 20px; border-radius: 20px;
+        }
+        #video-preview { 
+            position: absolute; bottom: 20px; right: 20px; 
+            width: 200px; height: 150px; border: 3px solid #fff; 
+            transform: scaleX(-1); border-radius: 15px; box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <div id="stats">得分: 0 | 存活: 0s</div>
+    <div id="gesture-status" style="color: #ff6b6b;">未检测到手势</div>
+    
+    <video id="video-preview"></video>
+
+    <div id="start-screen" class="ui-layer">
+        <h1 style="color: #4facfe; margin-bottom: 10px;">手势战机🚀</h1>
+        <p style="color: #666; margin-bottom: 30px;">伸出食指，移动手指来控制飞机</p>
+        <button onclick="initGestureGame()">启动飞行系统</button>
+    </div>
+
+    <div id="over-screen" class="ui-layer hidden">
+        <h1 style="color: #ff6b6b;">任务中止</h1>
+        <p id="final-score" style="font-size: 1.5rem; color: #444;"></p>
+        <button onclick="resetGame()" style="border-color: #ff6b6b; color: #ff6b6b;">再次起飞</button>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+</div>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const videoElement = document.getElementById('video-preview');
+    const statusEl = document.getElementById('gesture-status');
+    
+    let gameState = 'START';
+    let score = 0;
+    let startTime = 0;
+    let bullets = [];
+    let lastFrameTime = 0;
+    // 手机端检测：用于放大小球和飞船尺寸
+    const isMobile = () => window.innerWidth <= 768 || 'ontouchstart' in window;
+    const getScale = () => isMobile() ? 1.75 : 1;
+    
+    const player = {
+        x: window.innerWidth / 2,
+        y: window.innerHeight / 2,
+        targetX: window.innerWidth / 2,
+        targetY: window.innerHeight / 2,
+        size: 25,
+        color: '#4facfe', // 清新蓝
+        active: false
+    };
+
+    // --- 1. 手势识别逻辑 ---
+    const hands = new Hands({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.6,
+        minTrackingConfidence: 0.6
+    });
+
+    hands.onResults((results) => {
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            player.active = true;
+            statusEl.innerText = "手势已锁定";
+            statusEl.style.color = "#4facfe";
+            const indexFinger = results.multiHandLandmarks[0][8];
+            player.targetX = (1 - indexFinger.x) * canvas.width;
+            player.targetY = indexFinger.y * canvas.height;
+        } else {
+            player.active = false;
+            statusEl.innerText = "寻找食指中...";
+            statusEl.style.color = "#ff6b6b";
+        }
+    });
+
+    let cameraStarted = false;
+    let cameraStarting = false;
+    function startCameraAndHands() {
+        if (cameraStarted || cameraStarting) return;
+        cameraStarting = true;
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 640,
+            height: 480
+        });
+        camera.start().then(() => {
+            cameraStarted = true;
+            cameraStarting = false;
+        }).catch(() => {
+            cameraStarting = false;
+        });
+    }
+    function initGestureGame() {
+        document.getElementById('start-screen').classList.add('hidden');
+        if (!cameraStarted) startCameraAndHands();
+        resetGame();
+    }
+
+    // 进入界面就启动摄像头，确保第一局手势已就绪
+    window.addEventListener('load', startCameraAndHands);
+
+    // --- 2. 游戏核心逻辑 ---
+    function resize() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+    }
+    window.onresize = resize;
+    resize();
+
+    function resetGame() {
+        score = 0;
+        bullets = [];
+        startTime = Date.now();
+        lastFrameTime = 0;
+        gameState = 'PLAYING';
+        document.getElementById('over-screen').classList.add('hidden');
+        requestAnimationFrame(gameLoop);
+    }
+
+    function gameLoop(now) {
+        if (gameState !== 'PLAYING') return;
+        now = now || Date.now();
+        const dt = lastFrameTime ? Math.min((now - lastFrameTime) / 1000, 0.1) : 1/60;
+        lastFrameTime = now;
+
+        // 绘制清新背景
+        // 使用淡蓝色到白色的渐变
+        let gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+        gradient.addColorStop(0, '#e0f2fe');
+        gradient.addColorStop(1, '#ffffff');
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // 绘制一些淡淡的云朵作为装饰
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+        for(let i=0; i<5; i++) {
+            ctx.beginPath();
+            ctx.arc((i*300 + score*0.2)%canvas.width, (i*200)%canvas.height, 50, 0, Math.PI*2);
+            ctx.fill();
+        }
+
+        // 玩家平滑跟随
+        player.x += (player.targetX - player.x) * 0.15;
+        player.y += (player.targetY - player.y) * 0.15;
+
+        // 绘制战机（手机端与小球同比例放大）
+        const playerScale = getScale();
+        ctx.save();
+        ctx.translate(player.x, player.y);
+        ctx.scale(playerScale, playerScale);
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = 'rgba(79, 172, 254, 0.5)';
+        ctx.beginPath();
+        ctx.moveTo(25, 0); ctx.lineTo(-15, -12); ctx.lineTo(-15, 12); ctx.closePath();
+        ctx.fillStyle = player.active ? player.color : '#bdc3c7';
+        ctx.fill();
+        ctx.restore();
+
+        // 弹幕生成：从约第20秒的水平开始，每隔约10秒再增加一档难度
+        const elapsedSec = (Date.now() - startTime) / 1000;
+        const level = Math.floor(elapsedSec / 10);
+        const spawnChance = 0.086 + Math.min(level * 0.018, 0.11);
+        if (Math.random() < spawnChance) {
+            const colors = ['#ff9a9e', '#fad0c4', '#a1c4fd', '#c2e9fb', '#fbc2eb'];
+            const baseSize = (15 + Math.random() * 20) * getScale();
+            bullets.push({
+                x: canvas.width + 50,
+                y: Math.random() * canvas.height,
+                v: 4 + Math.random() * 4 + (score/300),
+                size: baseSize,
+                color: colors[Math.floor(Math.random() * colors.length)]
+            });
+        }
+
+        for (let i = bullets.length - 1; i >= 0; i--) {
+            let b = bullets[i];
+            b.x -= b.v * dt * 60;
+            
+            // 绘制子弹 (带有一点白色描边，在白底上更清晰)
+            ctx.beginPath();
+            ctx.arc(b.x, b.y, b.size/2, 0, Math.PI*2);
+            ctx.fillStyle = b.color;
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // 碰撞检测（飞船命中范围随缩放变化）
+            let dx = b.x - player.x;
+            let dy = b.y - player.y;
+            if (Math.sqrt(dx*dx + dy*dy) < (b.size/2 + 10 * getScale())) {
+                endGame();
+            }
+
+            if (b.x < -50) bullets.splice(i, 1);
+        }
+
+        score++;
+        document.getElementById('stats').innerText = `得分: ${score} | 存活: ${Math.floor((Date.now()-startTime)/1000)}s`;
+        
+        requestAnimationFrame(gameLoop);
+    }
+
+    function endGame() {
+        gameState = 'OVER';
+        document.getElementById('over-screen').classList.remove('hidden');
+        document.getElementById('final-score').innerText = `最终得分: ${score}`;
+    }
+</script>
+</body>
+</html>
